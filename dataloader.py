@@ -1,30 +1,28 @@
-import numpy as np
-import math
-import random
 import os
 import _pickle as pickle
+import numpy as np
 import xml.etree.ElementTree as ET
-
+import random
 from utils import *
+import matplotlib.pyplot as plt
 
 
 class DataLoader:
-    def __init__(self, args, logger, limit=500):
-        self.data_dir = args.data_dir
-        self.alphabet = args.alphabet
-        self.batch_size = args.batch_size
-        self.tsteps = args.tsteps
-        self.data_scale = args.data_scale  # scale data down by this factor
-        self.ascii_steps = args.tsteps / args.tsteps_per_ascii
-        self.logger = logger
+    def __init__(self, batch_size=50, tsteps=300, scale_factor=10, U_items=10, limit=500, alphabet="default"):
+        self.data_dir = "./data"
+        self.alphabet = alphabet
+        self.batch_size = batch_size
+        self.tsteps = tsteps
+        self.scale_factor = scale_factor  # divide data by this factor
         self.limit = limit  # removes large noisy gaps in the data
+        self.U_items = U_items
 
         data_file = os.path.join(self.data_dir, "strokes_training_data.cpkl")
         stroke_dir = self.data_dir + "/lineStrokes"
         ascii_dir = self.data_dir + "/ascii"
 
         if not (os.path.exists(data_file)):
-            self.logger.write("\tcreating training data cpkl file from raw source")
+            print("creating training data cpkl file from raw source")
             self.preprocess(stroke_dir, ascii_dir, data_file)
 
         self.load_preprocessed(data_file)
@@ -32,7 +30,7 @@ class DataLoader:
 
     def preprocess(self, stroke_dir, ascii_dir, data_file):
         # create data file from raw xml files from iam handwriting source.
-        self.logger.write("\tparsing dataset...")
+        print("Parsing dataset...")
 
         # build the list of xml files
         filelist = []
@@ -109,7 +107,7 @@ class DataLoader:
         for i in range(len(filelist)):
             if filelist[i][-3:] == 'xml':
                 stroke_file = filelist[i]
-                # print 'processing '+stroke_file
+                #                 print 'processing '+stroke_file
                 stroke = convert_stroke_to_array(getStrokes(stroke_file))
 
                 ascii_file = stroke_file.replace("lineStrokes", "ascii")[:-7] + ".txt"
@@ -120,14 +118,14 @@ class DataLoader:
                     strokes.append(stroke)
                     asciis.append(ascii)
                 else:
-                    self.logger.write("\tline length was too short. line was: " + ascii)
+                    print("======>>>> Line length was too short. Line was: " + ascii)
 
         assert (len(strokes) == len(asciis)), \
             "There should be a 1:1 correspondence between stroke data and ascii labels."
         f = open(data_file, "wb")
         pickle.dump([strokes, asciis], f, protocol=2)
         f.close()
-        self.logger.write("\tfinished parsing dataset. saved {} lines".format(len(strokes)))
+        print("Finished parsing dataset. Saved {} lines".format(len(strokes)))
 
     def load_preprocessed(self, data_file):
         f = open(data_file, "rb")
@@ -137,12 +135,8 @@ class DataLoader:
         # goes thru the list, and only keeps the text entries that have more than tsteps points
         self.stroke_data = []
         self.ascii_data = []
-        self.valid_stroke_data = []
-        self.valid_ascii_data = []
         counter = 0
 
-        # every 1 in 20 (5%) will be used for validation data
-        cur_data_counter = 0
         for i in range(len(self.raw_stroke_data)):
             data = self.raw_stroke_data[i]
             if len(data) > (self.tsteps + 2):
@@ -150,50 +144,44 @@ class DataLoader:
                 data = np.minimum(data, self.limit)
                 data = np.maximum(data, -self.limit)
                 data = np.array(data, dtype=np.float32)
-                data[:, 0:2] /= self.data_scale
-                cur_data_counter = cur_data_counter + 1
-                if cur_data_counter % 20 == 0:
-                    self.valid_stroke_data.append(data)
-                    self.valid_ascii_data.append(self.raw_ascii_data[i])
-                else:
-                    self.stroke_data.append(data)
-                    self.ascii_data.append(self.raw_ascii_data[i])
+                data[:, 0:2] /= self.scale_factor
+
+                self.stroke_data.append(data)
+                self.ascii_data.append(self.raw_ascii_data[i])
 
         # minus 1, since we want the ydata to be a shifted version of x data
         self.num_batches = int(len(self.stroke_data) / self.batch_size)
-        self.logger.write("\tloaded dataset:")
-        self.logger.write("\t\t{} train individual data points".format(len(self.stroke_data)))
-        self.logger.write("\t\t{} valid individual data points".format(len(self.valid_stroke_data)))
-        self.logger.write("\t\t{} batches".format(self.num_batches))
-
-    def validation_data(self):
-        # returns validation data
-        x_batch = []
-        y_batch = []
-        ascii_list = []
-        for i in range(self.batch_size):
-            valid_ix = i % len(self.valid_stroke_data)
-            data = self.valid_stroke_data[valid_ix]
-            x_batch.append(np.copy(data[:self.tsteps]))
-            y_batch.append(np.copy(data[1:self.tsteps + 1]))
-            ascii_list.append(self.valid_ascii_data[valid_ix])
-        one_hots = [to_one_hot(s, self.ascii_steps, self.alphabet) for s in ascii_list]
-        return x_batch, y_batch, ascii_list, one_hots
+        print("Loaded dataset:")
+        print("   -> {} individual data points".format(len(self.stroke_data)))
+        print("   -> {} batches".format(self.num_batches))
 
     def next_batch(self):
-        # returns a randomized, tsteps-sized portion of the training data
+        # returns a randomised, tsteps sized portion of the training data
         x_batch = []
         y_batch = []
         ascii_list = []
         for i in range(self.batch_size):
             data = self.stroke_data[self.idx_perm[self.pointer]]
-            idx = random.randint(0, len(data) - self.tsteps - 2)
             x_batch.append(np.copy(data[:self.tsteps]))
             y_batch.append(np.copy(data[1:self.tsteps + 1]))
             ascii_list.append(self.ascii_data[self.idx_perm[self.pointer]])
             self.tick_batch_pointer()
-        one_hots = [to_one_hot(s, self.ascii_steps, self.alphabet) for s in ascii_list]
+        one_hots = [self.one_hot(s) for s in ascii_list]
         return x_batch, y_batch, ascii_list, one_hots
+
+    def one_hot(self, s):
+        alphabet = ""
+        # index position 0 means "unknown"
+        if self.alphabet is "default":
+            alphabet = " abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+        seq = [alphabet.find(char) + 1 for char in s]
+        if len(seq) >= self.U_items:
+            seq = seq[:self.U_items]
+        else:
+            seq = seq + [0] * (self.U_items - len(seq))
+        one_hot = np.zeros((self.U_items, len(alphabet) + 1))
+        one_hot[np.arange(self.U_items), seq] = 1
+        return one_hot
 
     def tick_batch_pointer(self):
         self.pointer += 1
@@ -203,34 +191,42 @@ class DataLoader:
     def reset_batch_pointer(self):
         self.idx_perm = np.random.permutation(len(self.stroke_data))
         self.pointer = 0
+        print("pointer reset")
 
 
-# utility function for converting input ascii characters into vectors the network can understand.
-# index position 0 means "unknown"
-def to_one_hot(s, ascii_steps, alphabet):
-    steplimit = 3e3
-    s = s[:steplimit] if len(s) > steplimit else s  # clip super-long strings
-    seq = [alphabet.find(char) + 1 for char in s]
-    if len(seq) >= ascii_steps:
-        seq = seq[:ascii_steps]
-    else:
-        seq = seq + [0] * (ascii_steps - len(seq))
-    one_hot = np.zeros((ascii_steps, len(alphabet) + 1))
-    one_hot[np.arange(ascii_steps), seq] = 1
-    return one_hot
+batch_size = 5
+tsteps = 700
+data_scale = 50
+U_items = int(tsteps / 20)
+data_loader = DataLoader(batch_size=batch_size, tsteps=tsteps,
+                         scale_factor=data_scale, U_items=U_items, alphabet="default")
 
 
-# abstraction for logging
-class Logger:
-    def __init__(self, args):
-        self.logf = '{}train_scribe.txt'.format(args.log_dir) \
-            if args.train \
-            else '{}sample_scribe.txt'.format(args.log_dir)
-        with open(self.logf, 'w') as f:
-            f.write("Scribe: Realistic Handwriting in Tensorflow\n     by Sam Greydanus\n\n\n")
+def line_plot(strokes, title):
+    plt.figure(figsize=(20, 2))
+    eos_preds = np.where(strokes[:, -1] == 1)
+    eos_preds = [0] + list(eos_preds[0]) + [-1]  # add start and end indices
+    for i in range(len(eos_preds) - 1):
+        start = eos_preds[i] + 1
+        stop = eos_preds[i + 1]
+        plt.plot(strokes[start:stop, 0], strokes[start:stop, 1], 'b-', linewidth=2.0)
+    plt.title(title)
+    plt.gca().invert_yaxis()
+    plt.show()
 
-    def write(self, s, print_it=True):
-        if print_it:
-            print(s)
-        with open(self.logf, 'a') as f:
-            f.write(s + "\n")
+
+x, y, s, c = data_loader.next_batch()
+print(data_loader.pointer)
+for i in range(batch_size):
+    r = x[i]
+    strokes = r.copy()
+    strokes[:, :-1] = np.cumsum(r[:, :-1], axis=0)
+    line_plot(strokes, s[i][:U_items])
+
+with open(os.path.join('data', 'styles.p'), 'rb') as f:
+    style_strokes, style_strings = pickle.load(f,encoding="bytes")
+
+for i in range(len(style_strokes)):
+    strokes = style_strokes[i]
+    strokes[:, :-1] = np.cumsum(strokes[:, :-1], axis=0)
+    line_plot(strokes, "Style #{}: {}".format(i + 1, style_strings[i]))
